@@ -48,6 +48,7 @@ import { apiGet } from "@/lib/api";
 import type { Identity } from "@/types/identity";
 import { createFadeSlideVariants, createScaleFadeVariants } from "@/lib/motion/variants";
 import { AnimatedDiv } from "@/lib/motion/AnimatedDiv";
+import { openPrintWindow } from "@/lib/print-email";
 
 /** Find the identity whose email matches one of the To/CC addresses. */
 function findMatchingIdentity(
@@ -541,13 +542,11 @@ export function MessageActionBar() {
         disabled={disabled}
         onClick={() => {
           if (!data) return;
-          const content = data.html || `<pre>${data.text}</pre>`;
-          const win = window.open("", "_blank");
-          if (!win) return;
-          win.document.write(`<!DOCTYPE html><html><head><title>${data.subject}</title></head><body>${content}</body></html>`);
-          win.document.close();
-          win.focus();
-          win.print();
+          openPrintWindow({
+            subject: data.subject,
+            html: data.html,
+            text: data.text,
+          });
         }}
       >
         <Printer className="size-4" />
