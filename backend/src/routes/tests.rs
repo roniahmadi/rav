@@ -2201,6 +2201,82 @@
             .contains("relay denied"));
     }
 
+    #[tokio::test]
+    async fn send_rejects_path_traversal_draft_id() {
+        let static_dir = setup_static_dir();
+        let data_dir = TempDir::new().unwrap();
+        let config = test_config_with_smtp(
+            static_dir.path().to_str().unwrap(),
+            data_dir.path().to_str().unwrap(),
+        );
+        let store = test_store();
+        let (browser_id, account_id, token) = setup_test_account(&store, "alice@example.com");
+
+        let user_hash = crate::auth::user_data::hash_email("alice@example.com");
+        provision_user_db(data_dir.path().to_str().unwrap(), &user_hash);
+
+        // Absolute path that would be removed by cleanup if it were trusted.
+        let sentinel = data_dir.path().join("must-survive");
+        fs::create_dir_all(&sentinel).unwrap();
+        fs::write(sentinel.join("keep"), "keep").unwrap();
+
+        let app = create_router(AppServices { config, store, search_engine: test_search_engine(data_dir.path().to_str().unwrap()), db_pool_manager: test_db_pool_manager(data_dir.path().to_str().unwrap()), ..test_services("/tmp") });
+
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/messages/send")
+            .header("x-requested-with", "XMLHttpRequest")
+            .header("content-type", "application/json");
+        for (name, value) in auth_headers(&browser_id, &account_id, &token) {
+            req = req.header(name, value);
+        }
+        let payload = serde_json::json!({
+            "to": ["bob@example.com"],
+            "subject": "Hello",
+            "text_body": "Hi",
+            "draft_id": sentinel.to_str().unwrap(),
+        })
+        .to_string();
+        let response = app
+            .oneshot(req.body(Body::from(payload)).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(sentinel.join("keep").exists(), "cleanup must not delete an absolute draft path");
+    }
+
+    #[tokio::test]
+    async fn delete_draft_rejects_non_uuid_id() {
+        let static_dir = setup_static_dir();
+        let data_dir = TempDir::new().unwrap();
+        let config = test_config_with_imap(
+            static_dir.path().to_str().unwrap(),
+            data_dir.path().to_str().unwrap(),
+        );
+        let store = test_store();
+        let (browser_id, account_id, token) = setup_test_account(&store, "alice@example.com");
+
+        let user_hash = crate::auth::user_data::hash_email("alice@example.com");
+        provision_user_db(data_dir.path().to_str().unwrap(), &user_hash);
+
+        let app = create_router(AppServices { config, store, search_engine: test_search_engine(data_dir.path().to_str().unwrap()), db_pool_manager: test_db_pool_manager(data_dir.path().to_str().unwrap()), ..test_services("/tmp") });
+
+        let mut req = Request::builder()
+            .method("DELETE")
+            .uri("/api/drafts/not-a-uuid")
+            .header("x-requested-with", "XMLHttpRequest");
+        for (name, value) in auth_headers(&browser_id, &account_id, &token) {
+            req = req.header(name, value);
+        }
+        let response = app
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     // -----------------------------------------------------------------------
     // Outbox endpoint tests
     // -----------------------------------------------------------------------

@@ -50,6 +50,7 @@ pub async fn enqueue_handler(
     Json(req): Json<SendRequest>,
 ) -> Result<Response, AppError> {
     send::validate_send_request(&req)?;
+    let draft_id = send::normalize_optional_draft_id(req.draft_id.as_deref())?;
 
     if config.smtp_host.is_none() {
         return Err(AppError::ServiceUnavailable("SMTP server not configured".to_string()));
@@ -72,7 +73,7 @@ pub async fn enqueue_handler(
         let id = Uuid::new_v4().to_string();
         db::outbox::enqueue(conn, &NewOutboxEntry {
             id: &id,
-            draft_id: req.draft_id.as_deref(),
+            draft_id: draft_id.as_deref(),
             to_addrs: &req.to,
             cc_addrs: &req.cc,
             bcc_addrs: &req.bcc,

@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::Path as AxumPath;
@@ -15,6 +14,7 @@ use crate::error::AppError;
 use crate::imap::client::{ImapClient, ImapCredentials};
 use crate::realtime::events::{EventBus, MailEvent};
 
+use super::draft_paths;
 use super::AppServices;
 
 /// Serializes concurrent save/delete requests for the same draft UUID.
@@ -150,6 +150,7 @@ pub async fn save_draft_handler(
     AxumPath(uuid): AxumPath<String>,
     Json(req): Json<SaveDraftRequest>,
 ) -> Result<Response, AppError> {
+    let uuid = draft_paths::parse_draft_id(&uuid)?.to_string();
     let user_hash = session.user_hash.clone();
     let draft_locks = services.draft_locks.clone();
     draft_locks
@@ -269,6 +270,7 @@ pub async fn delete_draft_handler(
     Extension(db_pool_manager): Extension<Arc<db::pool::DbPoolManager>>,
     AxumPath(uuid): AxumPath<String>,
 ) -> Result<Response, AppError> {
+    let uuid = draft_paths::parse_draft_id(&uuid)?.to_string();
     let user_hash = session.user_hash.clone();
     draft_locks
         .with_lock(&user_hash, &uuid.clone(), || {
@@ -327,11 +329,11 @@ async fn delete_draft_locked(
         event_bus.publish(&session.user_hash, MailEvent::FolderUpdated { folder: Some(drafts_folder) }).await;
     }
 
-    // Clean up attachment files from disk.
-    let att_dir = Path::new(&config.data_dir)
-        .join(&session.user_hash)
-        .join("attachments")
-        .join(&uuid);
+    // Clean up attachment files from disk. The UUID was validated at the
+    // handler boundary; parse it again so this path cannot be built from an
+    // arbitrary request string.
+    let draft_uuid = draft_paths::parse_draft_id(&uuid)?;
+    let att_dir = draft_paths::attachment_dir(&config.data_dir, &session.user_hash, draft_uuid)?;
     if att_dir.exists()
         && let Err(e) = tokio::fs::remove_dir_all(&att_dir).await
     {

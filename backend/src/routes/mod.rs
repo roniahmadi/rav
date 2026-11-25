@@ -7,6 +7,7 @@ pub mod stickers;
 pub mod contact_groups;
 pub mod contacts;
 pub mod display_preferences;
+mod draft_paths;
 pub mod drafts;
 pub mod filters;
 pub mod folder_mgmt;
