@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::Path as AxumPath;
@@ -11,6 +10,8 @@ use crate::auth::session::SessionState;
 use crate::config::AppConfig;
 use crate::db;
 use crate::error::AppError;
+
+use super::draft_paths;
 
 /// Maximum attachment file size: 25 MB.
 const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024;
@@ -45,6 +46,7 @@ pub async fn list_attachments(
     Extension(db_pool_manager): Extension<Arc<db::pool::DbPoolManager>>,
     AxumPath(draft_uuid): AxumPath<String>,
 ) -> Result<Response, AppError> {
+    let draft_uuid = draft_paths::parse_draft_id(&draft_uuid)?.to_string();
     let rows = db::pool::with_user_db(&db_pool_manager, &session.user_hash, move |conn| {
         db::drafts::get_draft_attachments(conn, &draft_uuid)
     })
@@ -78,11 +80,9 @@ pub async fn upload_attachment(
     AxumPath(draft_id): AxumPath<String>,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
-    // Build the attachment storage directory.
-    let att_dir = Path::new(&config.data_dir)
-        .join(&session.user_hash)
-        .join("attachments")
-        .join(&draft_id);
+    // Draft ids are client-supplied: validate before using them in a path.
+    let draft_uuid = draft_paths::parse_draft_id(&draft_id)?;
+    let att_dir = draft_paths::attachment_dir(&config.data_dir, &session.user_hash, draft_uuid)?;
     tokio::fs::create_dir_all(&att_dir)
         .await
         .map_err(|e| AppError::InternalError(format!("Failed to create attachment dir: {e}")))?;
@@ -131,6 +131,7 @@ pub async fn upload_attachment(
         return Err(AppError::BadRequest("No files uploaded".to_string()));
     }
 
+    let draft_id = draft_uuid.to_string();
     db::pool::with_user_db(&db_pool_manager, &session.user_hash, {
         let draft_id = draft_id.clone();
         let saved = saved.clone();
@@ -165,6 +166,7 @@ pub async fn get_attachment_content(
     Extension(db_pool_manager): Extension<Arc<db::pool::DbPoolManager>>,
     AxumPath((draft_id, attachment_id)): AxumPath<(String, String)>,
 ) -> Result<Response, AppError> {
+    let draft_id = draft_paths::parse_draft_id(&draft_id)?.to_string();
     let attachments = db::pool::with_user_db(&db_pool_manager, &session.user_hash, move |conn| {
         db::drafts::get_draft_attachments(conn, &draft_id)
     })
@@ -195,6 +197,7 @@ pub async fn delete_attachment(
     Extension(db_pool_manager): Extension<Arc<db::pool::DbPoolManager>>,
     AxumPath((draft_id, attachment_id)): AxumPath<(String, String)>,
 ) -> Result<Response, AppError> {
+    let draft_id = draft_paths::parse_draft_id(&draft_id)?.to_string();
     // Get the attachment record so we can find the file path.
     let attachments = db::pool::with_user_db(&db_pool_manager, &session.user_hash, {
         let draft_id = draft_id.clone();

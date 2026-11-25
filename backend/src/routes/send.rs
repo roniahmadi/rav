@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::response::{IntoResponse, Response};
@@ -13,6 +12,8 @@ use crate::imap::client::{ImapClient, ImapCredentials};
 use crate::mail_transport::MailTransport;
 use crate::smtp::client::{AttachmentData, SendableMessage, SmtpClient, SmtpCredentials};
 use crate::smtp::types::{PgpMode, PgpSendParams};
+
+use super::draft_paths;
 
 /// IMAP/SMTP credentials for a single send, resolved once at enqueue time
 /// (from the live session) and passed down to `perform_send`. The outbox
@@ -267,6 +268,7 @@ pub async fn send_message_handler(
     Json(req): Json<SendRequest>,
 ) -> Result<Response, AppError> {
     validate_send_request(&req)?;
+    let draft_id = normalize_optional_draft_id(req.draft_id.as_deref())?;
 
     let pgp = req.pgp.as_ref().map(resolve_pgp_params).transpose()?;
 
@@ -284,7 +286,7 @@ pub async fn send_message_handler(
         html_body: req.html_body,
         in_reply_to: req.in_reply_to,
         references: req.references,
-        draft_id: req.draft_id,
+        draft_id,
         from_identity_id: req.from_identity_id,
         pgp,
     };
@@ -319,12 +321,24 @@ pub(crate) fn validate_send_request(req: &SendRequest) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate and canonicalise an optional draft id from a send/outbox request.
+/// Rejects non-UUID values before they can reach filesystem cleanup code.
+pub(crate) fn normalize_optional_draft_id(
+    draft_id: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    draft_id
+        .map(draft_paths::parse_draft_id)
+        .transpose()
+        .map(|id| id.map(|uuid| uuid.to_string()))
+}
+
 /// Load attachment data from disk for a given draft.
 async fn load_draft_attachments(
     db_pool_manager: &db::pool::DbPoolManager,
     user_hash: &str,
     draft_id: &str,
 ) -> Result<Vec<AttachmentData>, AppError> {
+    let draft_id = draft_paths::parse_draft_id(draft_id)?.to_string();
     let db_attachments = db::pool::with_user_db(db_pool_manager, user_hash, {
         let draft_id = draft_id.to_string();
         move |conn| db::drafts::get_draft_attachments(conn, &draft_id)
@@ -363,9 +377,19 @@ async fn cleanup_draft(
     draft_id: &str,
     imap_client: &Arc<dyn ImapClient>,
 ) {
+    // Outbox rows may predate this validation, so guard here too: a malformed
+    // draft id must never reach the filesystem cleanup below.
+    let draft_uuid = match draft_paths::parse_draft_id(draft_id) {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            tracing::warn!(draft_id, "Skipping draft cleanup: invalid draft id");
+            return;
+        }
+    };
+    let draft_id = draft_uuid.to_string();
     let user_hash = creds.user_hash.as_str();
     let pre = db::pool::with_user_db(db_pool_manager, user_hash, {
-        let draft_id = draft_id.to_string();
+        let draft_id = draft_id.clone();
         move |conn| {
             let imap_uid = db::drafts::get_staging(conn, &draft_id)
                 .ok()
@@ -410,10 +434,13 @@ async fn cleanup_draft(
         tracing::warn!(error = %e, "Failed to delete draft staging after send");
     }
 
-    let att_dir = Path::new(&config.data_dir)
-        .join(user_hash)
-        .join("attachments")
-        .join(draft_id);
+    let att_dir = match draft_paths::attachment_dir(&config.data_dir, user_hash, draft_uuid) {
+        Ok(dir) => dir,
+        Err(_) => {
+            tracing::warn!(draft_id, "Skipping draft cleanup: invalid attachment path");
+            return;
+        }
+    };
     if att_dir.exists()
         && let Err(e) = tokio::fs::remove_dir_all(&att_dir).await
     {
